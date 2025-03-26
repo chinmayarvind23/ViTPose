@@ -55,6 +55,7 @@ model = dict(
         mlp_ratio=4,
         qkv_bias=True,
         drop_path_rate=0.55,
+        use_flash_attn=True
     ),
     keypoint_head=dict(
         type='TopdownHeatmapSimpleHead',

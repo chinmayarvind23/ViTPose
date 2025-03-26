@@ -78,11 +78,12 @@ class Mlp(nn.Module):
 class Attention(nn.Module):
     def __init__(
             self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0.,
-            proj_drop=0., attn_head_dim=None,):
+            proj_drop=0., attn_head_dim=None, use_flash_attn=False):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.dim = dim
+        self.use_flash_attn = use_flash_attn
 
         if attn_head_dim is not None:
             head_dim = attn_head_dim
@@ -93,6 +94,7 @@ class Attention(nn.Module):
         self.qkv = nn.Linear(dim, all_head_dim * 3, bias=qkv_bias)
 
         self.attn_drop = nn.Dropout(attn_drop)
+        # print("Initialized attn_drop with p =", self.attn_drop.p)
         self.proj = nn.Linear(all_head_dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
@@ -100,32 +102,36 @@ class Attention(nn.Module):
         B, N, C = x.shape
         qkv = self.qkv(x)
         qkv = qkv.reshape(B, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]   # make torchscript happy (cannot use tensor as tuple)
-
+        q, k, v = qkv[0], qkv[1], qkv[2]
         q = q * self.scale
-        attn = (q @ k.transpose(-2, -1))
-
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).transpose(1, 2).reshape(B, N, -1)
+        if self.use_flash_attn:
+            # Using Pytorch's built-in SDPA
+            attn_output = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p, is_causal=False)
+            # print("Flash-attn branch, attn_output mean:", attn_output.mean().item())
+        else:
+            attn = (q @ k.transpose(-2, -1))
+            attn = attn.softmax(dim=-1)
+            attn = self.attn_drop(attn)
+            attn_output = attn @ v
+            # print("Standard attn branch, attn_output mean:", attn_output.mean().item())
+        x = attn_output.transpose(1, 2).reshape(B, N, -1)
         x = self.proj(x)
         x = self.proj_drop(x)
-
         return x
 
 class Block(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, 
                  drop=0., attn_drop=0., drop_path=0., act_layer=nn.GELU, 
-                 norm_layer=nn.LayerNorm, attn_head_dim=None
+                 norm_layer=nn.LayerNorm, attn_head_dim=None, use_flash_attn=False
                  ):
         super().__init__()
         
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale,
-            attn_drop=attn_drop, proj_drop=drop, attn_head_dim=attn_head_dim
+            attn_drop=attn_drop, proj_drop=drop, attn_head_dim=attn_head_dim,
+            use_flash_attn=use_flash_attn
             )
 
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
@@ -206,6 +212,7 @@ class ViT(BaseBackbone):
                  drop_path_rate=0., hybrid_backbone=None, norm_layer=None, use_checkpoint=False, 
                  frozen_stages=-1, ratio=1, last_norm=True,
                  patch_padding='pad', freeze_attn=False, freeze_ffn=False,
+                 use_flash_attn=False
                  ):
         # Protect mutable default arguments
         super(ViT, self).__init__()
@@ -216,6 +223,7 @@ class ViT(BaseBackbone):
         self.use_checkpoint = use_checkpoint
         self.patch_padding = patch_padding
         self.freeze_attn = freeze_attn
+        self.use_flash_attn = use_flash_attn 
         self.freeze_ffn = freeze_ffn
         self.depth = depth
 
@@ -235,7 +243,7 @@ class ViT(BaseBackbone):
         self.blocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, use_flash_attn=use_flash_attn
                 )
             for i in range(depth)])
 

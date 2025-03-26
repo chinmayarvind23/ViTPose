@@ -2,7 +2,7 @@
 import warnings
 
 from mmcv import Config
-from xtcocotools.cocoeval import COCOeval
+from pycocotools.cocoeval import COCOeval
 
 from ...builder import DATASETS
 from .topdown_coco_dataset import TopDownCocoDataset
